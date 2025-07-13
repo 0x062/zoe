@@ -6,75 +6,62 @@ dotenv.config();
 // -------------------------------------------------------
 // Configuration
 // -------------------------------------------------------
-const RPC_URL = process.env.RPC_URL;
-const TX_HASH = "0xe8e3d9f1f71d0ab33cb5e52e7984320741c32d9944645e5db6d57ca69d2d6c05";
+const RPC_URL = process.env.RPC_URL;                    // RPC endpoint
+const TX_HASH = "0xe8e3d9f1f71d0ab33cb5e52e7984320741c32d9944645e5db6d57ca69d2d6c05"; // Transaction hash to analyze
 
-// Extended ABI including common swap functions and Transfer event
-const ROUTER_ABI = [
-  "function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline)",
-  "function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline)",
-  "function getAmountsOut(uint256 amountIn, address[] calldata path)",
-  "event Transfer(address indexed from, address indexed to, uint256 value)"
+// ABI for Universal Router execute function
+const UNIVERSAL_ROUTER_ABI = [
+  "function execute(bytes commands, bytes[] inputs, uint256 deadline)"
 ];
 
-async function analyzeTx() {
-  try {
-    const provider = new ethers.JsonRpcProvider(RPC_URL);
-    const tx = await provider.getTransaction(TX_HASH);
-    if (!tx) throw new Error(`Transaction ${TX_HASH} not found`);
+async function main() {
+  const provider = new ethers.JsonRpcProvider(RPC_URL);
 
-    // Log raw input data and method ID
-    console.log("Raw input data:", tx.data);
-    const methodId = tx.data.slice(0, 10);
-    console.log("Method ID:", methodId);
+  // Fetch raw transaction
+  const tx = await provider.getTransaction(TX_HASH);
+  if (!tx) throw new Error(`Transaction ${TX_HASH} not found`);
+  console.log("Raw input data:\n", tx.data);
 
-    const receipt = await provider.getTransactionReceipt(TX_HASH);
-    if (!receipt) throw new Error(`Receipt for ${TX_HASH} not found`);
+  // Decode execute call
+  const iface = new ethers.Interface(UNIVERSAL_ROUTER_ABI);
+  const decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
+  const [commands, inputs, deadline] = decoded.args;
 
-    const iface = new ethers.Interface(ROUTER_ABI);
+  console.log(`\nMethod: ${decoded.name}`);
+  console.log("Commands (hex):", commands);
+  console.log("Deadline (unix):", deadline.toString());
+  console.log("Deadline (readable):", new Date(deadline.toNumber() * 1000).toLocaleString());
 
-    // Attempt to decode
-    let decoded;
+  // Decode each input element
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  console.log("\nInputs:");
+  inputs.forEach((inputBytes, idx) => {
+    console.log(`\n-- Input[${idx}] raw:`, inputBytes);
     try {
-      decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
-    } catch (e) {
-      console.error("Decoding failed with ABI methods. ABI may not match. See raw data above.");
+      const [asUint] = coder.decode(["uint256"], inputBytes);
+      console.log(`   as uint256: ${asUint.toString()}`);
       return;
-    }
+    } catch {}
+    try {
+      const [asAddrArr] = coder.decode(["address[]"], inputBytes);
+      console.log("   as address[]:", asAddrArr);
+      return;
+    } catch {}
+    try {
+      const [asAddr] = coder.decode(["address"], inputBytes);
+      console.log("   as address:", asAddr);
+      return;
+    } catch {}
+    console.log("   [undecoded raw data]");
+  });
 
-    const [amountIn, amountOutMin, path, toAddress, deadline] = decoded.args;
-    console.log("Decoded swap parameters:", {
-      method: decoded.name,
-      amountIn: amountIn.toString(),
-      amountOutMin: amountOutMin.toString(),
-      path,
-      toAddress,
-      deadline: new Date(deadline.toNumber() * 1000).toLocaleString(),
-    });
-
-    // Gas and events as before...
-    const gasUsed = receipt.gasUsed;
-    const gasPrice = tx.gasPrice;
-    const gasCostETH = gasUsed.mul(gasPrice);
-    console.log("Gas used:", gasUsed.toString());
-    console.log("Gas price (gwei):", ethers.formatUnits(gasPrice, "gwei"));
-    console.log("Total gas cost (ETH):", ethers.formatEther(gasCostETH));
-
-    const block = await provider.getBlock(receipt.blockNumber);
-    console.log(`Confirmed in block ${receipt.blockNumber} at ${new Date(block.timestamp * 1000).toLocaleString()}`);
-
-    console.log("Transfer events:");
-    receipt.logs.forEach(log => {
-      try {
-        const parsedLog = iface.parseLog(log);
-        if (parsedLog.name === "Transfer") {
-          console.log(`- from ${parsedLog.args.from} to ${parsedLog.args.to}: value ${parsedLog.args.value.toString()}`);
-        }
-      } catch {};
-    });
-  } catch (error) {
-    console.error("Error analyzing transaction:", error);
-  }
+  // Transaction receipt details
+  const receipt = await provider.getTransactionReceipt(TX_HASH);
+  console.log("\nReceipt Details:", {
+    blockNumber: receipt.blockNumber,
+    gasUsed: receipt.gasUsed.toString(),
+    status: receipt.status
+  });
 }
 
-analyzeTx();
+main().catch(console.error);
