@@ -6,62 +6,79 @@ dotenv.config();
 // -------------------------------------------------------
 // Configuration
 // -------------------------------------------------------
-const RPC_URL = process.env.RPC_URL;                    // RPC endpoint
-const TX_HASH = "0xe8e3d9f1f71d0ab33cb5e52e7984320741c32d9944645e5db6d57ca69d2d6c05"; // Transaction hash to analyze
+const RPC_URL = process.env.RPC_URL; // e.g., https://rpc-testnet.galileo.0g.ai
+const PRIVATE_KEY = process.env.PRIVATE_KEY; // Wallet private key
+// Universal Router contract address on Galileo testnet
+const UNIVERSAL_ROUTER_ADDRESS = process.env.UNIVERSAL_ROUTER_ADDRESS;
 
-// ABI for Universal Router execute function
+// Swap settings
+type SwapConfig = {
+  tokenIn: string;      // Address of token to swap from
+  tokenOut: string;     // Address of token to swap to
+  amountIn: string;     // Human-readable, e.g., "1.0"
+  slippage: number;     // e.g., 0.005 for 0.5%
+  deadlineOffset: number; // Seconds from now
+};
+
+const swapConfig: SwapConfig = {
+  tokenIn: process.env.TOKEN_IN_ADDRESS,
+  tokenOut: process.env.TOKEN_OUT_ADDRESS,
+  amountIn: process.env.SWAP_AMOUNT || "1.0",
+  slippage: parseFloat(process.env.SLIPPAGE || "0.005"),
+  deadlineOffset: parseInt(process.env.DEADLINE_OFFSET || "600"),
+};
+
+// Universal Router ABI
 const UNIVERSAL_ROUTER_ABI = [
-  "function execute(bytes commands, bytes[] inputs, uint256 deadline)"
+  "function execute(bytes commands, bytes[] inputs, uint256 deadline) payable returns (bytes[] memory)"
 ];
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  const router = new ethers.Contract(UNIVERSAL_ROUTER_ADDRESS, UNIVERSAL_ROUTER_ABI, wallet);
 
-  // Fetch raw transaction
-  const tx = await provider.getTransaction(TX_HASH);
-  if (!tx) throw new Error(`Transaction ${TX_HASH} not found`);
-  console.log("Raw input data:\n", tx.data);
+  // Prepare amounts
+  const amountIn = ethers.parseUnits(swapConfig.amountIn, 18);
 
-  // Decode execute call
-  const iface = new ethers.Interface(UNIVERSAL_ROUTER_ABI);
-  const decoded = iface.parseTransaction({ data: tx.data, value: tx.value });
-  const [commands, inputs, deadline] = decoded.args;
+  // Fetch amountsOut via router.getAmountsOut style? Universal Router doesn't expose directly
+  // Instead use a standard pair router ABI (e.g., UniswapV2) or a quoter contract
+  const quoterAbi = ["function getAmountsOut(uint256,address[]) view returns (uint256[])"];
+  const quoter = new ethers.Contract(swapConfig.routerPairAddress, quoterAbi, provider);
+  const path = [swapConfig.tokenIn, swapConfig.tokenOut];
+  const amountsOut = await quoter.getAmountsOut(amountIn, path);
+  const amountOutMin = amountsOut[1]
+    .mul(ethers.parseUnits((1 - swapConfig.slippage).toString(), 18))
+    .div(ethers.parseUnits("1.0", 18));
 
-  console.log(`\nMethod: ${decoded.name}`);
-  console.log("Commands (hex):", commands);
-  console.log("Deadline (unix):", deadline.toString());
-  console.log("Deadline (readable):", new Date(deadline.toNumber() * 1000).toLocaleString());
+  // Deadline
+  const deadline = Math.floor(Date.now() / 1000) + swapConfig.deadlineOffset;
 
-  // Decode each input element
-  const coder = ethers.AbiCoder.defaultAbiCoder();
-  console.log("\nInputs:");
-  inputs.forEach((inputBytes, idx) => {
-    console.log(`\n-- Input[${idx}] raw:`, inputBytes);
-    try {
-      const [asUint] = coder.decode(["uint256"], inputBytes);
-      console.log(`   as uint256: ${asUint.toString()}`);
-      return;
-    } catch {}
-    try {
-      const [asAddrArr] = coder.decode(["address[]"], inputBytes);
-      console.log("   as address[]:", asAddrArr);
-      return;
-    } catch {}
-    try {
-      const [asAddr] = coder.decode(["address"], inputBytes);
-      console.log("   as address:", asAddr);
-      return;
-    } catch {}
-    console.log("   [undecoded raw data]");
+  // Build commands and inputs
+  // 0x10 = swapExactTokensForTokens
+  const commands = "0x10";
+  const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+
+  const inputs = [
+    abiCoder.encode(["uint256"], [amountIn]),
+    abiCoder.encode(["uint256"], [amountOutMin]),
+    abiCoder.encode(["address[]"], [path]),
+    abiCoder.encode(["address"], [wallet.address]),
+    abiCoder.encode(["uint256"], [deadline])
+  ];
+
+  console.log("Executing swap via Universal Router...");
+  const tx = await router.execute(commands, inputs, deadline, {
+    // no ETH value since ERC20->ERC20
+    gasLimit: 500_000
   });
 
-  // Transaction receipt details
-  const receipt = await provider.getTransactionReceipt(TX_HASH);
-  console.log("\nReceipt Details:", {
-    blockNumber: receipt.blockNumber,
-    gasUsed: receipt.gasUsed.toString(),
-    status: receipt.status
-  });
+  console.log(`Swap tx sent: ${tx.hash}`);
+  const receipt = await tx.wait();
+  console.log(`Swap confirmed in block ${receipt.blockNumber}`);
 }
 
-main().catch(console.error);
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
